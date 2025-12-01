@@ -55,63 +55,65 @@ def get_yahoo_data():
 
 def get_shanghai_gold():
     """
-    爬取上海金價 (直接攻擊上游 API 策略)
-    1. Sina Finance (新浪): jinjia.vip 的真實數據源
-    2. Tencent Finance (騰訊): 備用數據源
+    爬取上海金價 (三層備援策略)
+    1. Sina Finance (HTTPS)
+    2. Tencent Finance (HTTPS)
+    3. Eastmoney (JSON API) - 對海外 IP 最友善
     """
-    # 偽裝成一般瀏覽器
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Referer": "https://finance.sina.com.cn/"
     }
+    
+    errors = []
 
     # --- Source 1: 新浪財經 API (Sina) ---
-    # 這是 jinjia.vip 背後真正調用的接口
-    # 格式: var hq_str_gds_Au99_99="380.00,..."
     try:
+        # 改用 HTTPS
         url_sina = "https://hq.sinajs.cn/list=gds_Au99_99"
-        resp = requests.get(url_sina, headers=headers, timeout=3)
-        
-        if resp.status_code == 200:
-            text = resp.text
-            # 解析: var hq_str_gds_Au99_99="最新價,..."
-            if '="' in text:
-                data_str = text.split('="')[1].split('"')[0]
-                data_parts = data_str.split(',')
-                # index 0: 最新價
-                # index 1: 開盤
-                # index 2: 最高
-                # index 3: 最低
-                # index 7: 昨收 (若最新價為0，用昨收)
-                
-                price = float(data_parts[0])
-                if price == 0 and len(data_parts) > 7:
-                     price = float(data_parts[7])
-                
-                if price > 0:
-                    return price
+        resp = requests.get(url_sina, headers=headers, timeout=2)
+        if resp.status_code == 200 and '="' in resp.text:
+            data_str = resp.text.split('="')[1].split('"')[0]
+            data_parts = data_str.split(',')
+            price = float(data_parts[0])
+            if price == 0 and len(data_parts) > 7: price = float(data_parts[7])
+            if price > 0: return price
     except Exception as e:
-        print(f"Sina API failed: {e}")
+        errors.append(f"Sina: {str(e)}")
 
     # --- Source 2: 騰訊財經 API (Tencent) ---
-    # 備用方案，格式類似
     try:
-        url_tencent = "http://qt.gtimg.cn/q=SGE_AU9999"
-        resp = requests.get(url_tencent, headers=headers, timeout=3)
-        if resp.status_code == 200:
-            text = resp.text
-            # 格式: v_SGE_AU9999="1~Au9999~380.00~..."
-            if '="' in text:
-                data_str = text.split('="')[1].split('"')[0]
-                data_parts = data_str.split('~')
-                # index 3: 最新價
-                if len(data_parts) > 3:
-                    price = float(data_parts[3])
-                    if price > 0:
-                        return price
+        # 改用 HTTPS
+        url_tencent = "https://qt.gtimg.cn/q=SGE_AU9999"
+        resp = requests.get(url_tencent, headers=headers, timeout=2)
+        if resp.status_code == 200 and '="' in resp.text:
+            data_str = resp.text.split('="')[1].split('"')[0]
+            data_parts = data_str.split('~')
+            if len(data_parts) > 3:
+                price = float(data_parts[3])
+                if price > 0: return price
     except Exception as e:
-        print(f"Tencent API failed: {e}")
+        errors.append(f"Tencent: {str(e)}")
 
+    # --- Source 3: 東方財富 API (Eastmoney) ---
+    # 這是最穩定的備援，通常不擋海外 IP
+    try:
+        # secid=113.Au99.99 (上海黃金交易所)
+        # fields=f43 (最新價)
+        url_east = "https://push2.eastmoney.com/api/qt/stock/get?secid=113.Au99.99&fields=f43"
+        resp = requests.get(url_east, headers=headers, timeout=3)
+        if resp.status_code == 200:
+            data = resp.json()
+            if data and data.get("data"):
+                price = data["data"].get("f43")
+                # 有時候會回傳 "-"
+                if price != "-":
+                    return float(price)
+    except Exception as e:
+        errors.append(f"Eastmoney: {str(e)}")
+
+    # 如果全失敗，回傳錯誤訊息 (Debug用)
+    # print(f"All Gold APIs failed: {errors}")
     return None
 
 def get_binance_usdt_cny():
@@ -210,7 +212,7 @@ def analyze_risk(metrics, hibor_val):
 
 def main():
     st.title("🇨🇳 CNH 爆貶戰情監控室 (Python Live Ver.)")
-    st.markdown("數據來源：Yahoo Finance, 新浪財經/騰訊財經 (API), Binance P2P")
+    st.markdown("數據來源：Yahoo Finance, 新浪/騰訊/東方財富 (API), Binance P2P")
     
     if st.button('🔄 立即更新數據'):
         st.cache_data.clear()
@@ -255,9 +257,12 @@ def main():
             delta_color="inverse" if premium_val > 30 else "normal"
         )
         if sh_gold:
-            st.caption(f"上海金 (Sina/Tencent): ¥{metrics['sh_gold']}/g")
+            st.caption(f"上海金 (CNY/g): ¥{metrics['sh_gold']}")
         else:
-            st.caption("⚠️ 金價 API 無回應")
+            # 增加一個 debug 訊息展開，幫助使用者排除問題
+            with st.expander("⚠️ 金價 API 無回應 (Debug)"):
+                st.write("嘗試連線 Sina, Tencent, Eastmoney 均失敗。")
+                st.write("可能原因：Streamlit Cloud IP 被大陸防火牆封鎖。")
 
         usdt_p = metrics['usdt_premium']
         st.metric(
@@ -297,4 +302,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
