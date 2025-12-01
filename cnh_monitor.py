@@ -6,6 +6,7 @@ import time
 from datetime import datetime
 import json
 import random
+from bs4 import BeautifulSoup # 新增 BeautifulSoup 用於解析網頁
 
 # --- 設定頁面 ---
 st.set_page_config(
@@ -67,47 +68,47 @@ def get_yahoo_data():
 
 def get_shanghai_gold():
     """
-    爬取上海黃金交易所 Au99.99 現貨價格
-    策略: 優先嘗試新浪財經 (Sina), 失敗則嘗試東方財富 (Eastmoney)
+    爬取上海金價
+    策略: 爬取 jinjia.vip (金價VIP) 的上海金價表格
+    目標 URL: https://www.jinjia.vip/Shanghai/
     """
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
-
-    # 1. 嘗試新浪財經 (Sina)
+    
+    # 嘗試: jinjia.vip
     try:
-        url_sina = "http://hq.sinajs.cn/list=gds_Au99_99"
-        headers["Referer"] = "https://finance.sina.com.cn/"
-        resp = requests.get(url_sina, headers=headers, timeout=2) # 縮短 timeout 快速切換
-        if resp.status_code == 200 and '"' in resp.text:
-            data_str = resp.text.split('"')[1]
-            data_parts = data_str.split(',')
-            # index 0: 最新價, index 7: 昨收
-            current_price = float(data_parts[0])
-            if current_price == 0:
-                 current_price = float(data_parts[7])
-            
-            if current_price > 0:
-                # print("Source: Sina") # Debug
-                return current_price
-    except Exception:
-        pass
-
-    # 2. 嘗試東方財富 (Eastmoney)
-    try:
-        # secid=113.Au99.99 (上海黃金交易所代碼)
-        # f43 = 最新價
-        url_east = "https://push2.eastmoney.com/api/qt/stock/get?ut=fa5fd1943c7b386f172d689348223716&fltt=2&invt=2&voll=2&fields=f43&secid=113.Au99.99"
-        resp = requests.get(url_east, headers=headers, timeout=3)
+        url = "https://www.jinjia.vip/Shanghai/"
+        resp = requests.get(url, headers=headers, timeout=5)
+        
         if resp.status_code == 200:
-            data = resp.json()
-            if data and data.get("data"):
-                price = data["data"].get("f43")
-                if price and price != "-":
-                    # print("Source: Eastmoney") # Debug
-                    return float(price)
+            # 使用 BeautifulSoup 解析 HTML
+            soup = BeautifulSoup(resp.text, 'lxml')
+            
+            # 尋找頁面中的表格行 (tr)
+            rows = soup.find_all('tr')
+            
+            for row in rows:
+                text = row.get_text()
+                # 尋找包含目標品種名稱的行
+                if "Au99.99" in text or "Au9999" in text:
+                    # 找到該行的所有儲存格 (td)
+                    cols = row.find_all('td')
+                    
+                    # 遍歷欄位，尋找像價格的數字
+                    # 通常表格結構是: 品種 | 最新價 | 開盤 | ...
+                    for col in cols:
+                        try:
+                            val_str = col.get_text().strip()
+                            # 嘗試轉換為浮點數
+                            val = float(val_str)
+                            # 簡單過濾：目前的金價(人民幣/克)大約在 400~900 之間
+                            if 400 < val < 1000:
+                                return val
+                        except ValueError:
+                            continue
     except Exception as e:
-        # print(f"Eastmoney failed: {e}")
+        print(f"Jinjia scrape error: {e}")
         pass
 
     return None
@@ -127,7 +128,7 @@ def get_binance_usdt_cny():
         "fiat": "CNY", "publisherType": None
     }
     try:
-        response = requests.post(url, json=payload, headers=headers, timeout=5)
+        response = requests.post(url, json=payload, headers=headers, timeout=3)
         if response.status_code == 200:
             data = response.json()
             if data['data']:
@@ -223,7 +224,7 @@ def analyze_risk(metrics, hibor_val):
 def main():
     # Header
     st.title("🇨🇳 CNH 爆貶戰情監控室 (Python Live Ver.)")
-    st.markdown("數據來源：Yahoo Finance (API), 新浪財經 (爬蟲), Binance P2P (爬蟲)")
+    st.markdown("數據來源：Yahoo Finance (API), jinjia.vip (爬蟲), Binance P2P (爬蟲)")
     
     if st.button('🔄 立即更新數據'):
         st.cache_data.clear()
@@ -358,4 +359,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
