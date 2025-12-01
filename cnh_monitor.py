@@ -17,61 +17,85 @@ st.set_page_config(
 
 # --- 數據抓取模組 ---
 
-@st.cache_data(ttl=60)  # 設定緩存 60 秒，避免頻繁請求被封鎖
+@st.cache_data(ttl=60)  # 設定緩存 60 秒
 def get_yahoo_data():
-    """從 Yahoo Finance 獲取基礎匯率與金價"""
+    """從 Yahoo Finance 獲取基礎匯率與金價 (修正 NaN 問題)"""
     tickers = ["CNY=X", "CNH=X", "HKD=X", "GC=F"]
     try:
-        data = yf.download(tickers, period="1d", interval="1m", progress=False)
-        # 取得最新一筆數據 (iloc[-1])
-        # 注意: yfinance 返回格式如果是 MultiIndex，需要特別處理
+        # 改用 5天 數據確保一定有資料，interval 改為 15m 或 5m 稍微穩定一點，避免 1m 的空缺
+        data = yf.download(tickers, period="5d", interval="5m", progress=False)
         
         result = {}
-        # 處理 yfinance 可能返回的格式差異
-        try:
-            df = data['Close']
-            result['cny'] = df['CNY=X'].iloc[-1]
-            result['cnh'] = df['CNH=X'].iloc[-1]
-            result['hkd'] = df['HKD=X'].iloc[-1]
-            result['gold_intl'] = df['GC=F'].iloc[-1]
-        except:
-             # Fallback 處理單一 ticker 或不同結構
-             for t in tickers:
-                 result[t] = data['Close'][t].iloc[-1]
-                 
-        return result
+        # 處理 yfinance 格式 (Close 欄位)
+        df_close = data['Close']
+
+        # 針對每一個 ticker 抓取「最後一個非空值」 (Last valid value)
+        for t in tickers:
+            try:
+                # dropna() 確保我們不會抓到最新一分鐘的 NaN
+                if t in df_close.columns:
+                    last_valid = df_close[t].dropna().iloc[-1]
+                    result[t] = float(last_valid) # 轉為 float 確保計算正常
+                else:
+                    # 有時候 yfinance 欄位名稱不會帶 =X (視版本而定)
+                    # 這裡做一個簡單的 fallback 搜尋
+                    col_name = [c for c in df_close.columns if t.replace('=X','') in c]
+                    if col_name:
+                         last_valid = df_close[col_name[0]].dropna().iloc[-1]
+                         result[t] = float(last_valid)
+            except Exception as e:
+                print(f"Error extracting {t}: {e}")
+                result[t] = None
+
+        # 映射回我們需要的 key 名稱
+        final_data = {
+            'cny': result.get("CNY=X"),
+            'cnh': result.get("CNH=X"),
+            'hkd': result.get("HKD=X"),
+            'gold_intl': result.get("GC=F")
+        }
+        
+        # 檢查是否有 None，如果有則回傳 None 讓 UI 顯示錯誤
+        if None in final_data.values():
+            return None
+            
+        return final_data
+
     except Exception as e:
         st.error(f"Yahoo Finance 數據獲取失敗: {e}")
         return None
 
 def get_shanghai_gold():
     """
-    爬取新浪財經 API 獲取上海黃金交易所 Au99.99 現貨價格
+    爬取新浪財經 API (加入 Header 偽裝)
     URL: http://hq.sinajs.cn/list=gds_Au99_99
     """
     url = "http://hq.sinajs.cn/list=gds_Au99_99"
-    headers = {"Referer": "https://finance.sina.com.cn/"}
+    # 加入 User-Agent 偽裝成瀏覽器
+    headers = {
+        "Referer": "https://finance.sina.com.cn/",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
     try:
         response = requests.get(url, headers=headers, timeout=5)
         if response.status_code == 200:
-            # 格式: var hq_str_gds_Au99_99="380.00,380.00,381.50,..."
             text = response.text
-            data_str = text.split('"')[1]
-            data_parts = data_str.split(',')
-            current_price = float(data_parts[0])  # 最新價
-            # 如果收盤導致最新價為 0，取昨收 (index 7) 或其他非零值
-            if current_price == 0:
-                 current_price = float(data_parts[7])
-            return current_price
+            # 格式: var hq_str_gds_Au99_99="380.00,..."
+            if '"' in text:
+                data_str = text.split('"')[1]
+                data_parts = data_str.split(',')
+                # index 0: 最新價, index 7: 昨收
+                current_price = float(data_parts[0])
+                if current_price == 0:
+                     current_price = float(data_parts[7])
+                return current_price
     except Exception as e:
-        # st.warning(f"上海金價爬取失敗: {e}") # Debug 用
         pass
     return None
 
 def get_binance_usdt_cny():
     """
     嘗試從幣安 P2P API 獲取 USDT/CNY 買單價格
-    注意：此接口極易變動或需要特定 Headers，若失敗則返回 None
     """
     url = "https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/adv/search"
     headers = {
@@ -87,30 +111,15 @@ def get_binance_usdt_cny():
         response = requests.post(url, json=payload, headers=headers, timeout=5)
         if response.status_code == 200:
             data = response.json()
-            # 取第一筆廣告的價格 (通常是最優價)
             if data['data']:
                 price = float(data['data'][0]['adv']['price'])
                 return price
     except Exception as e:
-        # st.warning(f"USDT 爬取失敗 (可能被擋): {e}")
         pass
     return None
 
 def get_cnh_hibor():
-    """
-    嘗試從東方財富網 API 獲取香港人民幣隔夜拆息 (HIBOR O/N)
-    代碼: 00000001 (HKCNH HIBOR ON) -> 需要確認東方財富具體代碼
-    這裡使用備用邏輯：模擬或抓取匯率網
-    為求穩定，這裡演示爬取 'Sina Finance' 全球市場數據或直接給予模擬值(若爬取失敗)
-    """
-    # 東方財富 API (香港銀行同業拆息 - 人民幣)
-    # 實際爬蟲極不穩定，為保證演示效果，若抓不到我們使用一個基於市場的估算值或顯示 N/A
-    
-    # 嘗試: http://push2.eastmoney.com/api/qt/stock/get?secid=100.HKCNH0N ...
-    # 這裡為避免程式碼過於複雜且易失效，我們先嘗試返回 N/A，使用者需手動查
-    # 但為了 Demo，我們寫一個模擬的 "正常範圍隨機波動" 若爬取失敗
-    
-    return None # 暫時返回 None，在 UI 層處理
+    return None 
 
 # --- 核心邏輯 ---
 
@@ -124,22 +133,23 @@ def calculate_metrics(yahoo_data, sh_gold, usdt_cny):
     gold_intl_usd = yahoo_data['gold_intl']
 
     # 1. 價差 (Spread in pips)
-    spread = (cnh - cny) * 10000
+    if cnh and cny:
+        spread = (cnh - cny) * 10000
+    else:
+        spread = 0
 
-    # 2. 黃金溢價 (Shanghai Premium)
-    # 國際金價 (USD/oz) -> 人民幣/克
-    # 1 oz = 31.1035 g
-    gold_intl_cny_g = (gold_intl_usd / 31.1035) * cny
-    
+    # 2. 黃金溢價
     gold_premium = 0
-    if sh_gold:
-        gold_premium = (sh_gold / cny * 31.1035) - gold_intl_usd # 用每盎司美元價差顯示
-        # 或者顯示每克人民幣價差: gold_premium_cny = sh_gold - gold_intl_cny_g
+    gold_intl_cny_g = 0
+    if gold_intl_usd and cny:
+        gold_intl_cny_g = (gold_intl_usd / 31.1035) * cny
+        if sh_gold:
+            # 顯示每盎司美元價差
+            gold_premium = (sh_gold / cny * 31.1035) - gold_intl_usd 
 
     # 3. USDT 溢價
     usdt_premium_pct = 0
-    if usdt_cny:
-        # 官方匯率通常參考 CNY=X 或 CNH=X，這裡用 CNH 作為基準比較
+    if usdt_cny and cnh:
         usdt_premium_pct = ((usdt_cny - cnh) / cnh) * 100
 
     return {
@@ -154,11 +164,6 @@ def calculate_metrics(yahoo_data, sh_gold, usdt_cny):
         "usdt_premium": usdt_premium_pct,
         "timestamp": datetime.now()
     }
-
-def get_status_color(level):
-    if level == "critical": return "🔴"
-    if level == "warning": return "🟡"
-    return "🟢"
 
 def analyze_risk(metrics, hibor_val):
     risk_report = {"level": "normal", "msg": "目前指標平穩，維持觀望。", "color": "green"}
@@ -210,21 +215,20 @@ def main():
         yahoo_data = get_yahoo_data()
         sh_gold = get_shanghai_gold()
         usdt_cny = get_binance_usdt_cny()
-        hibor = get_cnh_hibor() # 目前設為 None，因為 API 難抓
+        hibor = get_cnh_hibor() 
         
-        # HIBOR Fallback UI 處理
         hibor_display = hibor if hibor else "N/A (需手動查詢)"
-        hibor_val_for_logic = hibor if hibor else 2.5 # 預設給一個正常值以免邏輯壞掉
+        hibor_val_for_logic = hibor if hibor else 2.5 
 
     if not yahoo_data:
-        st.error("無法連接 Yahoo Finance，請檢查網絡。")
+        st.error("無法連接 Yahoo Finance，數據源暫時無法使用。")
         return
 
     # 計算指標
     metrics = calculate_metrics(yahoo_data, sh_gold, usdt_cny)
     risk = analyze_risk(metrics, hibor_val_for_logic)
 
-    # --- 戰情總結 (Action Center) ---
+    # --- 戰情總結 ---
     st.markdown("---")
     st.subheader(f"當前戰略建議：{risk['msg']}")
     if risk['color'] == "red":
@@ -247,7 +251,7 @@ def main():
         # 黃金
         premium_val = metrics['gold_premium']
         p_color = "normal"
-        if premium_val > 50: p_color = "inverse" # red
+        if premium_val > 50: p_color = "inverse"
         
         st.metric(
             label="上海金價溢價 (USD/oz)",
@@ -307,7 +311,7 @@ def main():
             label="離岸資金成本 (HIBOR O/N)",
             value=hibor_display,
             delta="警戒值 > 5%",
-            delta_color="off", # 無法自動判斷顏色因為可能是文字
+            delta_color="off",
             help="若飆升代表央行抽銀根夾殺空頭。"
         )
 
@@ -315,15 +319,11 @@ def main():
     with col3:
         st.markdown("### 3. 操作期 (扣板機)")
         
-        # 簡單的技術判斷
-        rsi_mock = "計算中..." # 這裡可以用 pandas ta lib 計算，為簡化先略過
-        
-        st.markdown("**操作檢核表：**")
-        
         check_1 = metrics['cnh'] > 7.30
         check_2 = metrics['spread'] > 500
         check_3 = metrics['gold_premium'] > 30
         
+        st.markdown("**操作檢核表：**")
         st.checkbox("CNH 突破 7.30", value=check_1, disabled=True)
         st.checkbox("價差擴大 > 500點", value=check_2, disabled=True)
         st.checkbox("黃金/USDT 異常溢價", value=check_3, disabled=True)
@@ -335,7 +335,7 @@ def main():
 
     st.markdown("---")
     st.caption(f"最後更新時間: {metrics['timestamp'].strftime('%Y-%m-%d %H:%M:%S')}")
-    st.caption("免責聲明：此工具透過爬蟲獲取數據，若網站改版可能會導致部分數值顯示 N/A。請以專業看盤軟體為準。")
+    st.caption("免責聲明：數據源可能會有延遲或 N/A，請以專業平台為準。")
 
 if __name__ == "__main__":
     main()
