@@ -69,7 +69,7 @@ def get_shanghai_gold():
     # 這是 jinjia.vip 背後真正調用的接口
     # 格式: var hq_str_gds_Au99_99="380.00,..."
     try:
-        url_sina = "http://hq.sinajs.cn/list=gds_Au99_99"
+        url_sina = "https://hq.sinajs.cn/list=gds_Au99_99"
         resp = requests.get(url_sina, headers=headers, timeout=3)
         
         if resp.status_code == 200:
@@ -297,3 +297,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
