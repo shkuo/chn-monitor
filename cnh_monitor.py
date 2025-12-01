@@ -56,20 +56,14 @@ def get_yahoo_data():
 def get_shanghai_gold():
     """
     爬取上海金價 (三層備援策略)
-    1. Sina Finance (HTTPS)
-    2. Tencent Finance (HTTPS)
-    3. Eastmoney (JSON API) - 對海外 IP 最友善
     """
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Referer": "https://finance.sina.com.cn/"
     }
     
-    errors = []
-
     # --- Source 1: 新浪財經 API (Sina) ---
     try:
-        # 改用 HTTPS
         url_sina = "https://hq.sinajs.cn/list=gds_Au99_99"
         resp = requests.get(url_sina, headers=headers, timeout=2)
         if resp.status_code == 200 and '="' in resp.text:
@@ -78,12 +72,11 @@ def get_shanghai_gold():
             price = float(data_parts[0])
             if price == 0 and len(data_parts) > 7: price = float(data_parts[7])
             if price > 0: return price
-    except Exception as e:
-        errors.append(f"Sina: {str(e)}")
+    except Exception:
+        pass
 
     # --- Source 2: 騰訊財經 API (Tencent) ---
     try:
-        # 改用 HTTPS
         url_tencent = "https://qt.gtimg.cn/q=SGE_AU9999"
         resp = requests.get(url_tencent, headers=headers, timeout=2)
         if resp.status_code == 200 and '="' in resp.text:
@@ -92,28 +85,22 @@ def get_shanghai_gold():
             if len(data_parts) > 3:
                 price = float(data_parts[3])
                 if price > 0: return price
-    except Exception as e:
-        errors.append(f"Tencent: {str(e)}")
+    except Exception:
+        pass
 
     # --- Source 3: 東方財富 API (Eastmoney) ---
-    # 這是最穩定的備援，通常不擋海外 IP
     try:
-        # secid=113.Au99.99 (上海黃金交易所)
-        # fields=f43 (最新價)
         url_east = "https://push2.eastmoney.com/api/qt/stock/get?secid=113.Au99.99&fields=f43"
         resp = requests.get(url_east, headers=headers, timeout=3)
         if resp.status_code == 200:
             data = resp.json()
             if data and data.get("data"):
                 price = data["data"].get("f43")
-                # 有時候會回傳 "-"
                 if price != "-":
                     return float(price)
-    except Exception as e:
-        errors.append(f"Eastmoney: {str(e)}")
+    except Exception:
+        pass
 
-    # 如果全失敗，回傳錯誤訊息 (Debug用)
-    # print(f"All Gold APIs failed: {errors}")
     return None
 
 def get_binance_usdt_cny():
@@ -140,9 +127,6 @@ def get_binance_usdt_cny():
     except Exception as e:
         pass
     return None
-
-def get_cnh_hibor():
-    return None 
 
 # --- 核心邏輯 ---
 
@@ -212,28 +196,64 @@ def analyze_risk(metrics, hibor_val):
 
 def main():
     st.title("🇨🇳 CNH 爆貶戰情監控室 (Python Live Ver.)")
-    st.markdown("數據來源：Yahoo Finance, 新浪/騰訊/東方財富 (API), Binance P2P")
+    st.markdown("數據來源：Yahoo Finance, (API) 新浪/騰訊/東方財富, Binance P2P")
     
-    if st.button('🔄 立即更新數據'):
-        st.cache_data.clear()
-        st.rerun()
+    # --- 側邊欄手動輸入區 ---
+    with st.sidebar:
+        st.header("🔧 手動數據輸入")
+        st.caption("若 API 抓取失敗，請在此輸入數據以啟用計算。")
+        
+        manual_sh_gold = st.number_input(
+            "上海金價 (Au99.99, CNY/g)", 
+            min_value=0.0, 
+            value=0.0, 
+            step=0.1, 
+            format="%.2f",
+            help="輸入人民幣/克，例如 620.50"
+        )
+        
+        manual_hibor = st.number_input(
+            "CNH HIBOR (%)", 
+            min_value=0.0, 
+            value=0.0, 
+            step=0.1, 
+            format="%.2f",
+            help="離岸人民幣隔夜拆息"
+        )
+        
+        st.markdown("---")
+        if st.button('🔄 立即更新數據'):
+            st.cache_data.clear()
+            st.rerun()
 
+    # --- 數據獲取 ---
     with st.spinner('正在掃描全球市場...'):
         yahoo_data = get_yahoo_data()
-        sh_gold = get_shanghai_gold()
+        sh_gold_scraped = get_shanghai_gold()
         usdt_cny = get_binance_usdt_cny()
-        hibor = None 
         
-        hibor_display = "N/A"
-        hibor_val = 2.5
+        # --- 黃金價格邏輯：手動 > 爬蟲 ---
+        if manual_sh_gold > 0:
+            final_sh_gold = manual_sh_gold
+            gold_source = "(手動)"
+        else:
+            final_sh_gold = sh_gold_scraped
+            gold_source = "(API)"
+            
+        # --- HIBOR 邏輯：手動 > 預設 ---
+        if manual_hibor > 0:
+            hibor_val = manual_hibor
+            hibor_display = f"{manual_hibor}% (手動)"
+        else:
+            hibor_val = 2.5 # 預設值
+            hibor_display = "N/A (API 無數據)"
 
     if not yahoo_data:
         st.error("Yahoo Finance 連線失敗")
-        # 即使 Yahoo 失敗，如果抓到金價也要嘗試顯示
-        if not sh_gold:
+        if not final_sh_gold:
              return
 
-    metrics = calculate_metrics(yahoo_data, sh_gold, usdt_cny)
+    metrics = calculate_metrics(yahoo_data, final_sh_gold, usdt_cny)
     risk = analyze_risk(metrics, hibor_val)
 
     st.markdown("---")
@@ -252,17 +272,18 @@ def main():
         
         st.metric(
             label="上海金價溢價 (USD/oz)",
-            value=f"${premium_val:.2f}" if sh_gold and yahoo_data else "N/A",
+            value=f"${premium_val:.2f}" if final_sh_gold and yahoo_data else "N/A",
             delta="警戒 > $30",
             delta_color="inverse" if premium_val > 30 else "normal"
         )
-        if sh_gold:
-            st.caption(f"上海金 (CNY/g): ¥{metrics['sh_gold']}")
+        
+        if final_sh_gold:
+            st.caption(f"上海金: ¥{final_sh_gold:.2f}/g {gold_source}")
+            if yahoo_data:
+                intl_g = (metrics['gold_intl_usd']/31.1035*metrics['cny'])
+                st.caption(f"國際折算: ¥{intl_g:.2f}/g")
         else:
-            # 增加一個 debug 訊息展開，幫助使用者排除問題
-            with st.expander("⚠️ 金價 API 無回應 (Debug)"):
-                st.write("嘗試連線 Sina, Tencent, Eastmoney 均失敗。")
-                st.write("可能原因：Streamlit Cloud IP 被大陸防火牆封鎖。")
+            st.warning("⚠️ 無法獲取上海金價，請在側邊欄手動輸入")
 
         usdt_p = metrics['usdt_premium']
         st.metric(
