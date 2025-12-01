@@ -6,8 +6,7 @@ import time
 from datetime import datetime
 import json
 import random
-from bs4 import BeautifulSoup 
-import re # 新增正則表達式處理
+import re 
 
 # --- 設定頁面 ---
 st.set_page_config(
@@ -24,7 +23,8 @@ def get_yahoo_data():
     """從 Yahoo Finance 獲取基礎匯率與金價"""
     tickers = ["CNY=X", "CNH=X", "HKD=X", "GC=F"]
     try:
-        data = yf.download(tickers, period="5d", interval="5m", progress=False)
+        # 增加 timeout 防止卡死
+        data = yf.download(tickers, period="5d", interval="5m", progress=False, timeout=10)
         result = {}
         df_close = data['Close']
         for t in tickers:
@@ -50,71 +50,67 @@ def get_yahoo_data():
             return None
         return final_data
     except Exception as e:
-        st.error(f"Yahoo Finance 數據獲取失敗: {e}")
+        # st.error(f"Yahoo Finance 數據獲取失敗: {e}")
         return None
 
 def get_shanghai_gold():
     """
-    爬取上海金價 (多源備援策略)
-    1. jinjia.vip
-    2. dyhjw.com (第一黃金網)
+    爬取上海金價 (直接攻擊上游 API 策略)
+    1. Sina Finance (新浪): jinjia.vip 的真實數據源
+    2. Tencent Finance (騰訊): 備用數據源
     """
+    # 偽裝成一般瀏覽器
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Referer": "https://finance.sina.com.cn/"
     }
 
-    # --- Source 1: jinjia.vip ---
+    # --- Source 1: 新浪財經 API (Sina) ---
+    # 這是 jinjia.vip 背後真正調用的接口
+    # 格式: var hq_str_gds_Au99_99="380.00,..."
     try:
-        url = "https://www.jinjia.vip/Shanghai/"
-        resp = requests.get(url, headers=headers, timeout=5)
+        url_sina = "http://hq.sinajs.cn/list=gds_Au99_99"
+        resp = requests.get(url_sina, headers=headers, timeout=3)
+        
         if resp.status_code == 200:
-            soup = BeautifulSoup(resp.text, 'lxml')
-            # 策略：尋找所有包含 Au99.99 的元件，然後找它附近的數字
-            # 有時候 Au99.99 寫法可能是 Au9999
-            targets = soup.find_all(string=re.compile(r"Au99\.?99"))
-            
-            for target in targets:
-                # 往上找父節點 td 或 tr
-                parent_td = target.find_parent('td')
-                if parent_td:
-                    # 找下一個 td (通常是價格)
-                    next_td = parent_td.find_next_sibling('td')
-                    if next_td:
-                        try:
-                            price_text = next_td.get_text().strip()
-                            price = float(price_text)
-                            if 400 < price < 1000:
-                                return price
-                        except ValueError:
-                            # 如果下一個不是，再下一個 (有時候中間有開盤價)
-                            continue
+            text = resp.text
+            # 解析: var hq_str_gds_Au99_99="最新價,..."
+            if '="' in text:
+                data_str = text.split('="')[1].split('"')[0]
+                data_parts = data_str.split(',')
+                # index 0: 最新價
+                # index 1: 開盤
+                # index 2: 最高
+                # index 3: 最低
+                # index 7: 昨收 (若最新價為0，用昨收)
+                
+                price = float(data_parts[0])
+                if price == 0 and len(data_parts) > 7:
+                     price = float(data_parts[7])
+                
+                if price > 0:
+                    return price
     except Exception as e:
-        print(f"Jinjia failed: {e}")
+        print(f"Sina API failed: {e}")
 
-    # --- Source 2: 第一黃金網 (dyhjw.com) ---
+    # --- Source 2: 騰訊財經 API (Tencent) ---
+    # 備用方案，格式類似
     try:
-        url2 = "http://www.dyhjw.com/gold/shanghai.html"
-        resp2 = requests.get(url2, headers=headers, timeout=5)
-        resp2.encoding = "utf-8" # 強制編碼
-        if resp2.status_code == 200:
-            soup2 = BeautifulSoup(resp2.text, 'lxml')
-            # 尋找表格行
-            rows = soup2.find_all('tr')
-            for row in rows:
-                text = row.get_text()
-                if "Au99.99" in text or "Au9999" in text:
-                    cols = row.find_all('td')
-                    for col in cols:
-                        try:
-                            # 尋找像價格的欄位
-                            val_str = col.get_text().strip()
-                            val = float(val_str)
-                            if 400 < val < 1000:
-                                return val
-                        except ValueError:
-                            continue
+        url_tencent = "http://qt.gtimg.cn/q=SGE_AU9999"
+        resp = requests.get(url_tencent, headers=headers, timeout=3)
+        if resp.status_code == 200:
+            text = resp.text
+            # 格式: v_SGE_AU9999="1~Au9999~380.00~..."
+            if '="' in text:
+                data_str = text.split('="')[1].split('"')[0]
+                data_parts = data_str.split('~')
+                # index 3: 最新價
+                if len(data_parts) > 3:
+                    price = float(data_parts[3])
+                    if price > 0:
+                        return price
     except Exception as e:
-        print(f"Dyhjw failed: {e}")
+        print(f"Tencent API failed: {e}")
 
     return None
 
@@ -169,7 +165,9 @@ def calculate_metrics(yahoo_data, sh_gold, usdt_cny):
         
         if sh_gold:
             # 溢價(USD/oz) = (上海金價(CNY/g) - 國際金價(CNY/g)) / 匯率 * 31.1035
+            # 計算每克的人民幣價差
             diff_per_gram_cny = sh_gold - gold_intl_cny_g
+            # 換算回每盎司美元
             gold_premium = (diff_per_gram_cny / cny) * 31.1035
 
     # 3. USDT 溢價
@@ -212,7 +210,7 @@ def analyze_risk(metrics, hibor_val):
 
 def main():
     st.title("🇨🇳 CNH 爆貶戰情監控室 (Python Live Ver.)")
-    st.markdown("數據來源：Yahoo Finance, jinjia.vip/dyhjw (爬蟲), Binance P2P")
+    st.markdown("數據來源：Yahoo Finance, 新浪財經/騰訊財經 (API), Binance P2P")
     
     if st.button('🔄 立即更新數據'):
         st.cache_data.clear()
@@ -229,7 +227,9 @@ def main():
 
     if not yahoo_data:
         st.error("Yahoo Finance 連線失敗")
-        return
+        # 即使 Yahoo 失敗，如果抓到金價也要嘗試顯示
+        if not sh_gold:
+             return
 
     metrics = calculate_metrics(yahoo_data, sh_gold, usdt_cny)
     risk = analyze_risk(metrics, hibor_val)
@@ -250,38 +250,41 @@ def main():
         
         st.metric(
             label="上海金價溢價 (USD/oz)",
-            value=f"${premium_val:.2f}" if sh_gold else "N/A",
+            value=f"${premium_val:.2f}" if sh_gold and yahoo_data else "N/A",
             delta="警戒 > $30",
             delta_color="inverse" if premium_val > 30 else "normal"
         )
         if sh_gold:
-            st.caption(f"上海金: ¥{metrics['sh_gold']}/g")
+            st.caption(f"上海金 (Sina/Tencent): ¥{metrics['sh_gold']}/g")
         else:
-            st.caption("⚠️ 爬蟲未能獲取上海金價，可能是網站反爬或連線問題")
+            st.caption("⚠️ 金價 API 無回應")
 
         usdt_p = metrics['usdt_premium']
         st.metric(
             label="USDT 溢價",
-            value=f"{usdt_p:.2f}%" if usdt_cny else "N/A",
+            value=f"{usdt_p:.2f}%" if usdt_cny and yahoo_data else "N/A",
             delta="警戒 > 2%",
             delta_color="inverse" if usdt_p > 2 else "normal"
         )
-        st.metric(label="港幣 (HKD)", value=f"{metrics['hkd']:.4f}", delta="弱方 7.85", delta_color="inverse" if metrics['hkd'] > 7.84 else "off")
+        if yahoo_data:
+             st.metric(label="港幣 (HKD)", value=f"{metrics['hkd']:.4f}", delta="弱方 7.85", delta_color="inverse" if metrics['hkd'] > 7.84 else "off")
 
     # 2. 防守期
     with col2:
         st.markdown("### 2. 防守期")
-        st.metric(label="離岸人民幣 (CNH)", value=f"{metrics['cnh']:.4f}", delta="關鍵 7.35", delta_color="inverse" if metrics['cnh'] > 7.30 else "normal")
-        spr = metrics['spread']
-        st.metric(label="價差 (Spread)", value=f"{spr:.0f} pips", delta="警戒 > 500", delta_color="inverse" if spr > 500 else "normal")
+        if yahoo_data:
+            st.metric(label="離岸人民幣 (CNH)", value=f"{metrics['cnh']:.4f}", delta="關鍵 7.35", delta_color="inverse" if metrics['cnh'] > 7.30 else "normal")
+            spr = metrics['spread']
+            st.metric(label="價差 (Spread)", value=f"{spr:.0f} pips", delta="警戒 > 500", delta_color="inverse" if spr > 500 else "normal")
         st.metric(label="HIBOR O/N", value=hibor_display, delta="警戒 > 5%", help="需手動查詢")
 
     # 3. 操作期
     with col3:
         st.markdown("### 3. 操作期")
-        check_1 = metrics['cnh'] > 7.30
-        check_2 = metrics['spread'] > 500
-        check_3 = metrics['gold_premium'] > 30
+        check_1 = metrics['cnh'] > 7.30 if metrics else False
+        check_2 = metrics['spread'] > 500 if metrics else False
+        check_3 = metrics['gold_premium'] > 30 if metrics else False
+        
         st.checkbox("CNH > 7.30", value=check_1, disabled=True)
         st.checkbox("Spread > 500", value=check_2, disabled=True)
         st.checkbox("資金外逃跡象", value=check_3, disabled=True)
@@ -289,7 +292,8 @@ def main():
         else: st.info("✋ 觀望中")
 
     st.markdown("---")
-    st.caption(f"更新時間: {metrics['timestamp'].strftime('%H:%M:%S')}")
+    if metrics:
+        st.caption(f"更新時間: {metrics['timestamp'].strftime('%H:%M:%S')}")
 
 if __name__ == "__main__":
     main()
