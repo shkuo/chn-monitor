@@ -67,30 +67,49 @@ def get_yahoo_data():
 
 def get_shanghai_gold():
     """
-    爬取新浪財經 API (加入 Header 偽裝)
-    URL: http://hq.sinajs.cn/list=gds_Au99_99
+    爬取上海黃金交易所 Au99.99 現貨價格
+    策略: 優先嘗試新浪財經 (Sina), 失敗則嘗試東方財富 (Eastmoney)
     """
-    url = "http://hq.sinajs.cn/list=gds_Au99_99"
-    # 加入 User-Agent 偽裝成瀏覽器
     headers = {
-        "Referer": "https://finance.sina.com.cn/",
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
+
+    # 1. 嘗試新浪財經 (Sina)
     try:
-        response = requests.get(url, headers=headers, timeout=5)
-        if response.status_code == 200:
-            text = response.text
-            # 格式: var hq_str_gds_Au99_99="380.00,..."
-            if '"' in text:
-                data_str = text.split('"')[1]
-                data_parts = data_str.split(',')
-                # index 0: 最新價, index 7: 昨收
-                current_price = float(data_parts[0])
-                if current_price == 0:
-                     current_price = float(data_parts[7])
+        url_sina = "http://hq.sinajs.cn/list=gds_Au99_99"
+        headers["Referer"] = "https://finance.sina.com.cn/"
+        resp = requests.get(url_sina, headers=headers, timeout=2) # 縮短 timeout 快速切換
+        if resp.status_code == 200 and '"' in resp.text:
+            data_str = resp.text.split('"')[1]
+            data_parts = data_str.split(',')
+            # index 0: 最新價, index 7: 昨收
+            current_price = float(data_parts[0])
+            if current_price == 0:
+                 current_price = float(data_parts[7])
+            
+            if current_price > 0:
+                # print("Source: Sina") # Debug
                 return current_price
-    except Exception as e:
+    except Exception:
         pass
+
+    # 2. 嘗試東方財富 (Eastmoney)
+    try:
+        # secid=113.Au99.99 (上海黃金交易所代碼)
+        # f43 = 最新價
+        url_east = "https://push2.eastmoney.com/api/qt/stock/get?ut=fa5fd1943c7b386f172d689348223716&fltt=2&invt=2&voll=2&fields=f43&secid=113.Au99.99"
+        resp = requests.get(url_east, headers=headers, timeout=3)
+        if resp.status_code == 200:
+            data = resp.json()
+            if data and data.get("data"):
+                price = data["data"].get("f43")
+                if price and price != "-":
+                    # print("Source: Eastmoney") # Debug
+                    return float(price)
+    except Exception as e:
+        # print(f"Eastmoney failed: {e}")
+        pass
+
     return None
 
 def get_binance_usdt_cny():
@@ -339,3 +358,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
